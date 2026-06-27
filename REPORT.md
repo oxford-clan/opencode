@@ -28,3 +28,9 @@
 이 문서들은 현재 체크아웃된 `opencode` 1.17.9 기준으로, 기존 1.17.7 분석 결과와의 차이를 확인하기 위해 작성한 로컬 분석 자료다.
 
 - [opencode 1.17.7 -> 1.17.9 System Prompt 변경 분석](./opencode_analysis/opencode-1.17.9/opencode-1.17.7-to-1.17.9-system-prompt-diff-report.md) — 1.17.7 분석 대비 1.17.9에서 agent별 system prompt 교체 구조, 실제 prompt txt 파일, max-steps prompt 이동, 후속 user message wrapping 제거 여부를 비교한 보고서.
+
+### opencode 1.17.11 (dev@986846fbd) Analysis Documents
+
+이 문서들은 현재 로컬 체크아웃된 `opencode` 1.17.11 기준으로, `REPORT.md`에 등록된 1.17.7/1.17.9 분석 결과와 최신 소스의 차이를 확인하기 위해 작성한 갭 분석 자료다.
+
+- [opencode 1.17.9 -> 1.17.11 Gap Analysis](./opencode_analysis/opencode-1.17.11/opencode-1.17.9-to-1.17.11-gap-report.md) — 현재 1.17.11 소스 기준으로 기존 system prompt, agent 정보, instruction loading, context usage, compaction, task permission 분석이 유지되는지 검증하고, V2 Session Runner/SystemContext 및 GitLab workflow model 전용 `isWorkflow` 경로가 adapter 연동 분석에 만드는 갭을 정리한 보고서.
