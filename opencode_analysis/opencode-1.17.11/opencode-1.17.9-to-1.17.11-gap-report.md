@@ -1,384 +1,362 @@
-# opencode 1.17.9 -> 1.17.11 Gap Analysis
+# opencode 1.17.9 -> 1.17.11 분석 GAP 보고서
 
 > 분석 대상: `D:\AREA51\workspace\opencode`
-> 현재 기준: `packages/opencode/package.json` version `1.17.11`, local HEAD `986846fbd`
-> 비교 기준: `REPORT.md`에 등록된 `opencode 1.17.7` 분석 문서들과 `opencode 1.17.9` system prompt 갭 분석
-> 작성 목적: 기존 분석 결과가 현재 최신 로컬 소스에서 여전히 유효한지, `aiu-opencode-adapter` 연동 관점에서 보완해야 할 갭이 무엇인지 정리한다.
+> 현재 소스 기준: `packages/opencode/package.json` `1.17.11`, `HEAD` = `986846fbd-dirty`
+> 기존 분석 기준: `REPORT.md`의 `opencode 1.17.7` 분석 묶음 및 `opencode 1.17.9` system prompt diff 보고서
+> 작성 목적: 기존 분석 내용과 현재 소스 사이에서 `aiu-opencode-adapter` 연동 판단에 영향을 줄 수 있는 차이를 정리한다.
 
 ---
 
-## 1. 결론
+## 0. 결론
 
-현재 `opencode` 1.17.11 소스에서 `REPORT.md`의 핵심 결론은 대부분 유지된다.
+현재 체크아웃된 소스는 `opencode` 1.17.11이며, 기존 `REPORT.md`가 다루는 최신 분석 기준은 1.17.9다.
 
-특히 `aiu-opencode-adapter`가 일반 OpenAI-compatible custom provider로 붙는 경로에서는 다음 분석이 여전히 유효하다.
+1.17.9 분석의 핵심 결론인 **legacy V1 provider request에서 agent prompt가 있으면 모델별 base prompt를 대체한다**는 구조는 1.17.11에서도 유지된다.
 
-- provider request 준비 시 agent별 system prompt 교체 구조가 유지된다.
-- `chat.headers` plugin hook에는 현재 agent 이름이 전달되지만, 기본 outbound provider header에는 agent 이름이 없다.
-- `AGENTS.md`/`CLAUDE.md` 같은 프로젝트 지시문은 legacy 경로에서 system prompt의 `Instructions from:` 블록으로 들어간다.
-- `/init`은 일반 command template이고, `/review`는 `subtask: true` command다.
-- context usage UI는 assistant message의 token category 합계를 model context limit으로 나눠 표시한다.
-- `task` permission deny는 일반 tool 실행이 아니라 subagent delegation 노출과 실행에 주로 영향을 준다.
+다만 1.17.11 현재 소스에는 기존 분석에 없거나 보강이 필요한 차이가 있다.
 
-다만 1.17.11 현재 소스에는 기존 1.17.7/1.17.9 분석이 충분히 다루지 못한 변화가 있다.
-
-1. V2 Session Runner와 core `SystemContext` 경로가 더 구체화됐다.
-2. legacy instruction loading과 V2/core instruction loading의 포함 범위가 다르다.
-3. GitLab `GitLabWorkflowLanguageModel` 전용 `isWorkflow` 경로가 생겨 system prompt 전달 방식이 일반 OpenAI-compatible provider와 다르다.
-4. overflow/auto compaction 판단에서 `tokens.total`이 있으면 우선 사용한다.
-5. Task tool에는 background subagent, child permission derivation, doom-loop guard 등 운영 동작이 추가되어 기존 task permission 분석을 보강해야 한다.
-
-따라서 `REPORT.md`의 기존 분석은 "legacy/OpenAI-compatible provider 경로 기준"으로는 계속 활용 가능하지만, 1.17.11 이후에는 V2/core runtime 및 workflow-provider 전용 경로와 구분해서 읽어야 한다.
+1. System context에 `<available_references>`와 `<mcp_instructions>` 블록이 추가될 수 있다. 현재 adapter가 `<env>`, `Instructions from:`, `<available_skills>`만 추출한다면 이 정보는 workflow로 전달되지 않을 수 있다.
+2. `GitLabWorkflowLanguageModel` 전용 경로가 생겼다. 이 경로는 system prompt를 Chat Completions `messages`에 넣지 않고 `workflowModel.systemPrompt`로 별도 전달하며, tool execution도 provider-side workflow 모델에 bridge한다. AIU adapter의 OpenAI-compatible provider 경로와는 별개의 내부 workflow provider 경로로 구분해야 한다.
+3. native LLM runtime이 opt-in으로 추가됐다. OpenAI/OpenAI-compatible/Anthropic 일부 provider는 `OPENCODE_EXPERIMENTAL_NATIVE_LLM` 활성화 시 AI SDK 대신 `@opencode-ai/llm` native runtime을 탈 수 있다.
+4. V2 session runner의 compaction이 1.17.9 분석보다 더 구체화됐다. `compactIfNeeded`, overflow recovery, `<conversation-checkpoint>` message가 현재 core runner 흐름에 들어 있다.
+5. structured output 요청은 `StructuredOutput` tool과 추가 system prompt를 주입한다. adapter가 JSON schema format 요청을 받는 경우 일반 tool loop와 다른 `toolChoice: "required"` 흐름을 고려해야 한다.
+6. usage 정규화의 큰 방향은 유지된다. AI SDK usage에서 `inputTokens`, `outputTokens`, reasoning/cache token 필드를 뽑아 LLM event로 넘기는 구조는 현재도 확인된다.
 
 ---
 
-## 2. 현재 소스 기준
+## 1. 기준 버전 확인
 
-확인 결과:
+현재 소스 기준:
 
-- 현재 checkout: `986846fbd`
-- 현재 package version: `packages/opencode/package.json`의 `version` = `1.17.11`
-- `REPORT.md`의 최신 직접 비교 문서: `opencode 1.17.7 -> 1.17.9 System Prompt 변경 분석`
+- `packages/opencode/package.json:3` — `"version": "1.17.11"`
+- `package.json:7` — `"packageManager": "bun@1.3.14"`
+- `package.json:65` — root catalog의 `ai` 버전은 `6.0.168`
+- `packages/opencode/package.json:122` — `gitlab-ai-provider` `6.9.3`
 
-주의:
+로컬 git에는 기존 1.17.9 분석 보고서에 적힌 `v1.17.9` tag 또는 `5c23e8841` object가 없었다. 따라서 이 보고서는 git diff가 아니라 다음 방식으로 작성했다.
 
-- 로컬 git history에는 `REPORT.md`에 적힌 `v1.17.9@5c23e8841` ref가 존재하지 않아 `git diff 5c23e8841..HEAD` 방식의 직접 diff는 수행하지 못했다.
-- 대신 현재 1.17.11 소스에서 기존 분석의 핵심 근거 지점을 직접 재검증했다.
+- 기존 1.17.9 gap 보고서의 결론을 기준선으로 사용.
+- 현재 1.17.11 소스 파일을 직접 열람해 핵심 계약 유지/변경 여부를 검증.
+
+현재 worktree의 `dirty` 상태는 분석 지침 문서인 `AGENTS.md` 변경 때문이다.
 
 ---
 
-## 3. 유지되는 분석
+## 2. Legacy V1 system prompt 구조
 
-### 3.1 Legacy provider request의 system prompt 조립 구조
+### 유지되는 부분
 
-`packages/opencode/src/session/llm/request.ts`에서 system prompt는 여전히 다음 구조로 조립된다.
+`packages/opencode/src/session/llm/request.ts`의 system prompt 조립 구조는 기존 분석과 같은 계열이다.
 
-```ts
-...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
-...input.system,
-...(input.user.system ? [input.user.system] : []),
-```
+- `packages/opencode/src/session/llm/request.ts:58` — `const system = [...]`
+- `packages/opencode/src/session/llm/request.ts:57` — OpenAI OAuth 여부 판정
+- `packages/opencode/src/session/llm/request.ts:70` — `experimental.chat.system.transform` hook
+- `packages/opencode/src/session/llm/request.ts:101` — `isOpenaiOauth || input.isWorkflow`일 때 messages 처리 분기
 
-의미:
+핵심 의미:
 
-- `explore`, `title`, `summary`, `compaction`처럼 agent prompt가 있으면 provider별 base prompt를 대체한다.
-- `build`, `plan`, `general`처럼 agent prompt가 없으면 `SystemPrompt.provider(model)`가 모델 ID에 맞는 base prompt를 선택한다.
-- 이후 environment, project instructions, skills, MCP instructions 등이 `input.system`으로 뒤에 붙는다.
+- `input.agent.prompt`가 있으면 모델별 provider base prompt 대신 agent prompt가 첫 system block이 된다.
+- agent prompt가 없으면 `SystemPrompt.provider(input.model)`가 모델 ID에 맞는 base prompt를 고른다.
+- 그 뒤에 environment, instruction, MCP, skills 등 session-level system context가 붙는다.
 
-이 결론은 1.17.7 분석 및 1.17.9 갭 분석과 동일하다.
+### 보강해야 할 부분
 
-근거 파일:
-
-- `packages/opencode/src/session/llm/request.ts`
-- `packages/opencode/src/session/system.ts`
-- `packages/opencode/src/agent/agent.ts`
-
-### 3.2 Agent 이름은 hook에는 있지만 기본 provider request에는 없다
-
-`chat.headers` plugin hook에는 여전히 `agent: input.agent.name`이 전달된다.
-
-```ts
-const { headers } = yield* input.plugin.trigger(
-  "chat.headers",
-  {
-    sessionID: input.sessionID,
-    agent: input.agent.name,
-    model: input.model,
-    provider: input.provider,
-    message: input.user,
-  },
-  { headers: {} },
-)
-```
-
-하지만 일반 provider outbound header에는 agent 이름이 기본 포함되지 않는다.
-
-```ts
-{
-  "x-session-affinity": input.sessionID,
-  "X-Session-Id": input.sessionID,
-  ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
-  "User-Agent": USER_AGENT,
-}
-```
-
-따라서 adapter가 현재 agent 이름을 안정적으로 알아야 한다는 기존 결론도 유지된다.
-
-권장 방향도 동일하다.
-
-- opencode plugin 또는 core patch로 `x-opencode-agent` 같은 header를 추가한다.
-- adapter가 그 값을 `opencode_agent` 또는 현재 adapter의 `agent` workflow input으로 넘긴다.
-- system prompt나 model ID를 보고 agent를 추론하는 방식은 보조 수단으로만 취급한다.
-
-근거 파일:
-
-- `packages/opencode/src/session/llm/request.ts`
-
-### 3.3 `/init`과 `/review` command 구조
-
-현재 `packages/opencode/src/command/index.ts` 기준:
-
-- `/init`은 `subtask` 설정이 없다. 즉 일반 prompt template을 현재 세션에 주입하는 경로다.
-- `/review`는 `subtask: true`다.
-
-core plugin command 정의에서도 같은 구조가 유지된다.
-
-근거 파일:
-
-- `packages/opencode/src/command/index.ts`
-- `packages/core/src/plugin/command.ts`
-- `packages/core/src/plugin/command/initialize.txt`
-- `packages/core/src/plugin/command/review.txt`
+1.17.11에는 `experimental.chat.system.transform` 이후 system array가 2개 이상으로 나뉠 수 있다. 첫 header가 유지되고 system part가 3개 이상이면 나머지를 두 번째 system part로 합친다.
 
 adapter 관점:
 
-- `/init` 자체는 user message로 전달되므로 adapter의 `messages` 전달 경로에서 빠지지 않는다.
-- `/init` 중 모델이 `task` tool로 `explore` subagent를 호출하면 child session system prompt가 달라질 수 있고, 이때 adapter가 system prompt 일부만 추출하는 정책의 영향은 여전히 중요하다.
-
-### 3.4 Context usage UI 계산 구조
-
-UI context usage 계산은 여전히 assistant message의 token category 합계를 model limit으로 나눈다.
-
-App:
-
-- `packages/app/src/components/session/session-context-metrics.ts`
-- `tokenTotal = input + output + reasoning + cache.read + cache.write`
-- `usage = Math.round((total / limit) * 100)`
-
-TUI:
-
-- `packages/tui/src/component/prompt/index.tsx`
-- `packages/tui/src/feature-plugins/sidebar/context.tsx`
-- 최신 assistant message 선택 조건에 `tokens.output > 0` 경로가 남아 있다.
-
-따라서 adapter가 `prompt_tokens`만 크게 주고 `completion_tokens`가 0에 가까운 경우, 일부 TUI 표면에서는 usage 선택이 기대와 다를 수 있다는 기존 분석은 유지된다.
+- adapter가 모든 `role:"system"` 메시지를 합쳐 처리한다면 큰 문제는 없다.
+- system message가 하나라고 가정하는 분석이나 구현은 더 이상 안전하지 않다.
 
 ---
 
-## 4. 보완이 필요한 갭
+## 3. System context 신규/누락 가능 블록
 
-### 4.1 V2 Session Runner와 SystemContext 경로
+기존 adapter 중심 분석은 다음 세 블록을 주요 전달 대상으로 봤다.
 
-1.17.11 현재 `packages/core/src/session/runner/llm.ts`는 V2 runner의 provider turn을 상당 부분 구현하고 있다.
+- `<env>`
+- `Instructions from: ...`
+- `<available_skills>`
 
-주요 동작:
+1.17.11 현재는 여기에 더해 다음 블록이 생길 수 있다.
 
-- `SessionInput` pending steer/queue promotion
-- `SessionContextEpoch.initialize/prepare`
-- `SystemContextRegistry.load()`
-- `SkillGuidance`와 `ReferenceGuidance` 결합
-- `LLM.request(...)` 생성
-- `llm.stream(request)` 1회 호출
-- tool materialization 및 local tool settlement
-- overflow compaction recovery
+### 3.1 Project references
 
-기존 1.17.7 분석은 legacy `SessionPrompt`와 `packages/opencode/src/session/llm/request.ts` 중심이다. 1.17.11에서는 V2 경로가 더 중요해졌으므로, 이후 분석 문서에서는 다음을 분리해야 한다.
+`packages/opencode/src/session/system.ts`에서 reference guidance를 environment system context에 포함한다.
 
-| 구분 | 주요 파일 | adapter 영향 |
+- `packages/opencode/src/session/system.ts:79` — `<available_references>`
+- `packages/opencode/src/session/system.ts:91` — `</available_references>`
+
+V2 쪽에도 같은 개념이 있다.
+
+- `packages/core/src/reference/guidance.ts` — reference list를 `<available_references>`로 렌더링
+
+adapter 영향:
+
+- 현재 adapter가 `<env>`만 추출하면 reference 경로와 설명은 누락된다.
+- 사내 workflow가 프로젝트 reference 기능을 써야 한다면 `opencode_references` 같은 별도 workflow input 또는 system context passthrough가 필요하다.
+
+### 3.2 MCP instructions
+
+`packages/opencode/src/session/system.ts`는 MCP server가 제공한 instructions를 system context로 추가할 수 있다.
+
+- `packages/opencode/src/session/system.ts:110` — `mcp(...)`
+- `packages/opencode/src/session/system.ts:118` — `<mcp_instructions>`
+- `packages/opencode/src/session/system.ts:124` — `</mcp_instructions>`
+
+adapter 영향:
+
+- MCP instructions는 tool schema와 별개로 모델이 따라야 할 server-level 지시다.
+- adapter가 이를 workflow로 넘기지 않으면, MCP tool은 노출되더라도 server별 사용 지시가 누락될 수 있다.
+
+### 3.3 Skills
+
+`<available_skills>`는 유지된다.
+
+- `packages/opencode/src/session/system.ts:102` — skills 안내 문구
+- `packages/opencode/src/skill/index.ts:330` — `Skill.fmt(...)`
+- `packages/opencode/src/skill/index.ts:335` — `<available_skills>`
+- `packages/core/src/skill/guidance.ts` — V2 skill guidance도 같은 tag를 사용
+
+adapter 영향:
+
+- 기존 `opencode_available_skills` 추출 전략은 여전히 유효하다.
+- 다만 V2/core guidance는 skill location을 포함하지 않는 반면 V1 `Skill.fmt(..., { verbose: true })`는 `<location>`을 포함한다. workflow가 skill loading을 에뮬레이션하거나 설명만 쓰는지에 따라 차이가 있다.
+
+---
+
+## 4. Agent prompt 및 agent 정의
+
+### Legacy agent
+
+`packages/opencode/src/agent/agent.ts`의 legacy agent 구조는 기존 분석과 같은 큰 틀을 유지한다.
+
+- `packages/opencode/src/agent/agent.ts:140` — built-in `agents`
+- `packages/opencode/src/agent/agent.ts:141` — `build`
+- `packages/opencode/src/agent/agent.ts:156` — `plan`
+- `packages/opencode/src/agent/agent.ts:182` — `general`
+- `packages/opencode/src/agent/agent.ts:196` — `explore`
+- `packages/opencode/src/agent/agent.ts:219` — `compaction`
+- `packages/opencode/src/agent/agent.ts:234` — `title`
+- `packages/opencode/src/agent/agent.ts:250` — `summary`
+
+`explore`, `compaction`, `title`, `summary`는 여전히 prompt 파일을 가진다.
+
+- `packages/opencode/src/agent/agent.ts:214` — `PROMPT_EXPLORE`
+- `packages/opencode/src/agent/agent.ts:224` — `PROMPT_COMPACTION`
+- `packages/opencode/src/agent/agent.ts:248` — `PROMPT_TITLE`
+- `packages/opencode/src/agent/agent.ts:263` — `PROMPT_SUMMARY`
+
+### V2 agent plugin
+
+V2 plugin 쪽에서는 default agent에도 explicit system이 들어간다.
+
+- `packages/core/src/plugin/agent.ts:12` — `BUILD_SYSTEM`
+- `packages/core/src/plugin/agent.ts:125` — default agent update
+- `packages/core/src/plugin/agent.ts:127` — `item.system ??= BUILD_SYSTEM`
+- `packages/core/src/plugin/agent.ts:163` — `explore`
+- `packages/core/src/plugin/agent.ts:184` — `compaction`
+- `packages/core/src/plugin/agent.ts:191` — `title`
+- `packages/core/src/plugin/agent.ts:198` — `summary`
+
+adapter 영향:
+
+- 기존 1.17.9 보고서는 "V2에서도 agent별 system이 있으면 baseline 앞에 온다"고 정리했다. 1.17.11에서는 default/build 계열에도 V2 system이 더 명확하게 존재한다.
+- V1 adapter 경로에서는 `build`가 여전히 모델별 base prompt를 쓰지만, V2 core runner 분석에는 default agent system을 별도로 반영해야 한다.
+
+---
+
+## 5. GitLab Workflow provider 경로 추가
+
+1.17.11의 가장 큰 구조적 gap은 `GitLabWorkflowLanguageModel` 특수 처리다.
+
+근거:
+
+- `packages/opencode/src/session/llm.ts:13` — `GitLabWorkflowLanguageModel` import
+- `packages/opencode/src/session/llm.ts:105` — `isWorkflow`
+- `packages/opencode/src/session/llm.ts:119` — workflow model branch
+- `packages/opencode/src/session/llm.ts:127` — `workflowModel.toolExecutor`
+- `packages/opencode/src/session/llm.ts:150` — `sessionPreapprovedTools`
+- `packages/opencode/src/session/llm.ts:156` — `approvalHandler`
+- `packages/opencode/src/session/llm/request.ts:101` — `isWorkflow`이면 system messages를 일반 messages에 넣지 않음
+
+provider 구성:
+
+- `packages/opencode/src/provider/provider.ts:130` — `gitlab-ai-provider` bundled provider
+- `packages/opencode/src/provider/provider.ts:591` 이후 — GitLab provider custom loader
+- `packages/opencode/src/provider/provider.ts:628` 이후 — `duo-workflow-*` 모델 처리
+
+의미:
+
+- 이 경로는 AIU adapter처럼 외부 OpenAI-compatible HTTP adapter에 tool call JSON을 맡기는 구조가 아니다.
+- opencode가 workflow language model 객체에 직접 `systemPrompt`, `toolExecutor`, approval handler를 꽂는다.
+- workflow provider가 tool call을 요청하면 opencode 내부 tool system이 실행하고 결과를 다시 workflow provider에 돌려준다.
+
+adapter 영향:
+
+- AIU adapter 분석에서는 이 경로를 "참고 가능한 내부 workflow 통합 사례"로 볼 수 있다.
+- 하지만 AIU adapter가 받는 OpenAI-compatible request body와는 wire contract가 다르므로, 이 경로의 system/tool 전달 방식을 그대로 adapter 계약으로 가정하면 안 된다.
+
+---
+
+## 6. Native LLM runtime opt-in
+
+1.17.11에는 AI SDK 외에 native runtime 선택지가 있다.
+
+근거:
+
+- `packages/opencode/src/effect/runtime-flags.ts` — `OPENCODE_EXPERIMENTAL_NATIVE_LLM`
+- `packages/opencode/src/session/llm.ts:226` — native runtime 분기
+- `packages/opencode/src/session/llm/native-runtime.ts` — native runtime implementation
+
+지원 범위:
+
+- `packages/opencode/src/session/llm/native-runtime.ts`는 providerID가 `openai`, `anthropic`, 또는 `opencode*`인 경우를 우선 지원한다.
+- npm package는 `@ai-sdk/openai`, `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic` 중심이다.
+
+adapter 영향:
+
+- AIU adapter가 `@ai-sdk/openai-compatible` provider로 등록되어 있고 `OPENCODE_EXPERIMENTAL_NATIVE_LLM`이 켜지면, 기존 AI SDK wire behavior와 다른 native request path를 탈 가능성이 있다.
+- native runtime은 `@opencode-ai/llm` request로 낮춘 뒤 transport한다. OpenAI-compatible adapter가 AI SDK의 exact Chat Completions request shape에 의존한다면 E2E 확인이 필요하다.
+- 기본값은 opt-in이므로, 플래그가 꺼져 있으면 기존 AI SDK path 분석이 우선이다.
+
+---
+
+## 7. Tool call repair 및 schema strict 처리
+
+현재 AI SDK path에는 invalid tool call repair가 들어 있다.
+
+- `packages/opencode/src/session/llm.ts:296` — `experimental_repairToolCall`
+- `packages/opencode/src/session/llm.ts:317` — `activeTools`에서 `invalid` 제외
+
+동작:
+
+- tool name 대소문자만 다른 경우 lowercase tool로 repair한다.
+- repair할 수 없으면 `invalid` tool에 `{ tool, error }` JSON을 넣는다.
+
+또한 OpenAI Responses 계열 provider에 대해 tool schema strict false를 강제로 넣는다.
+
+- `packages/opencode/src/session/llm/request.ts:149` — strict false 설명
+- `packages/opencode/src/session/llm/request.ts:157` — `tools[key] = { ...tools[key], strict: false }`
+
+adapter 영향:
+
+- adapter가 workflow output에서 unknown tool이나 malformed arguments를 과도하게 차단하면 opencode의 repair/invalid tool 흐름을 방해할 수 있다.
+- 기존 adapter 분석의 "tool call envelope guard는 의미 오류를 OpenCode에 위임"이라는 방향은 1.17.11에서도 타당하다.
+
+---
+
+## 8. Structured output path
+
+1.17.11 legacy prompt loop는 JSON schema structured output 요청에 대해 별도 tool과 system prompt를 추가한다.
+
+근거:
+
+- `packages/opencode/src/session/prompt.ts:74` — `STRUCTURED_OUTPUT_DESCRIPTION`
+- `packages/opencode/src/session/prompt.ts:82` — `STRUCTURED_OUTPUT_SYSTEM_PROMPT`
+- `packages/opencode/src/session/prompt.ts:1243` — `StructuredOutput` tool 추가
+- `packages/opencode/src/session/prompt.ts:1270` — structured output system prompt 추가
+- `packages/opencode/src/session/prompt.ts:1284` — `toolChoice: "required"`
+
+adapter 영향:
+
+- 일반 코딩 agent tool loop와 달리, structured output 요청은 모델이 반드시 `StructuredOutput` tool을 호출해야 한다.
+- workflow JSON output 에뮬레이션과 충돌할 수 있다. workflow system prompt가 자체 `{"answer","tool_calls"}` envelope를 강제하는 경우, opencode가 요구하는 `StructuredOutput` tool call을 어떻게 표현할지 별도 검토가 필요하다.
+
+---
+
+## 9. V2 compaction gap
+
+기존 1.17.9 보고서는 V2 runner의 step-limit 변화를 언급했지만, 1.17.11 현재 V2 compaction 흐름은 더 구체화되어 있다.
+
+근거:
+
+- `packages/core/src/session/runner/llm.ts:108` — `SessionCompaction.make(...)`
+- `packages/core/src/session/runner/llm.ts:210` — `compactIfNeeded(...)`
+- `packages/core/src/session/runner/llm.ts:365` — overflow recovery 가능한 `runTurn`
+- `packages/core/src/session/compaction.ts:16` — summary template
+- `packages/core/src/session/compaction.ts:166` — `buildPrompt(...)`
+- `packages/core/src/session/compaction.ts:177` — `compactAfterOverflow(...)`
+- `packages/core/src/session/compaction.ts:230` — `compactIfNeeded(...)`
+- `packages/core/src/session/runner/to-llm-message.ts:152` — `<conversation-checkpoint>`
+
+adapter 영향
+
+- V2 path에서는 compaction summary가 `compaction` message로 history에 재주입되고, provider-facing message에는 `<conversation-checkpoint>`가 들어갈 수 있다.
+- adapter가 V2 request를 받는 경우, 이 synthetic checkpoint를 일반 user prompt처럼 workflow에 전달하게 된다.
+- 기존 V1 `/compact` marker 중심 분석만으로는 V2 compaction request/history shape를 설명하기 부족하다
+
+---
+
+## 10. Usage/context 계산
+
+usage normalization의 핵심은 현재도 유지된다.
+
+근거:
+
+- `packages/opencode/src/session/llm/ai-sdk.ts:44` — AI SDK usage extraction
+- `packages/opencode/src/session/llm/ai-sdk.ts:56` — `inputTokens`
+- `packages/opencode/src/session/llm/ai-sdk.ts:57` — `outputTokens`
+- `packages/opencode/src/session/llm/ai-sdk.ts:60` — cache read tokens
+- `packages/opencode/src/session/llm/ai-sdk.ts:87` — `finish-step`
+- `packages/opencode/src/session/llm/ai-sdk.ts:116` — `finish` total usage
+
+기존 분석 유지:
+
+- adapter가 문자 수를 `prompt_tokens`/`completion_tokens`로 반환하면 opencode는 이를 token으로 받아들인다.
+- context percentage는 모델 metadata의 context limit과 저장된 token category 합산에 의존한다.
+
+보강점:
+
+- AI SDK 6 path에서는 `finish-step`과 `finish` 이벤트가 모두 usage를 가질 수 있다.
+- provider metadata가 reasoning/tool/result metadata와 함께 더 많이 보존된다. adapter가 provider-specific metadata를 추가로 흘려보낼 경우 opencode가 일부를 보존할 수 있다.
+
+---
+
+## 11. 기존 분석 문서별 유효성 평가
+
+| 기존 문서 | 1.17.11 평가 | 보강 필요 |
 | --- | --- | --- |
-| Legacy path | `packages/opencode/src/session/prompt.ts`, `packages/opencode/src/session/llm/request.ts` | 현재 OpenAI-compatible adapter 분석의 주 근거 |
-| V2 path | `packages/core/src/session/runner/llm.ts`, `packages/core/src/system-context/*` | 향후 opencode가 V2를 기본화하면 system/context 전달 방식 검토 필요 |
-
-근거 파일:
-
-- `packages/core/src/session/runner/llm.ts`
-- `packages/core/src/system-context/builtins.ts`
-- `packages/core/src/instruction-context.ts`
-
-### 4.2 Legacy instruction loading과 V2 instruction context 차이
-
-legacy instruction service는 다음을 본다.
-
-- global config `AGENTS.md`
-- global `~/.claude/CLAUDE.md` unless disabled
-- project-level `AGENTS.md`
-- project-level `CLAUDE.md`
-- deprecated `CONTEXT.md`
-- config `instructions`에 지정된 local file, glob, URL
-- read tool 결과에 붙는 nested instruction reminder
-
-근거:
-
-- `packages/opencode/src/session/instruction.ts`
-
-반면 core V2 `InstructionContext`는 현재 다음 경로가 중심이다.
-
-- global config `AGENTS.md`
-- project upward `AGENTS.md`
-
-근거:
-
-- `packages/core/src/instruction-context.ts`
-
-차이:
-
-- legacy는 `CLAUDE.md`, `CONTEXT.md`, config `instructions` URL까지 다룬다.
-- V2/core instruction context는 `AGENTS.md` 중심으로 단순하다.
-
-adapter 관점:
-
-- 현재 adapter의 `opencode_instructions` 추출이 legacy system prompt의 `Instructions from:` 블록에 의존한다면, legacy provider path에서는 여전히 맞다.
-- V2 runner가 external provider 요청의 기본 경로가 될 경우, instruction baseline/update 이벤트가 어떤 형태로 provider request에 들어가는지 별도 분석이 필요하다.
-
-### 4.3 GitLab workflow model 전용 `isWorkflow` 경로
-
-1.17.11에는 `GitLabWorkflowLanguageModel` 전용 처리 경로가 있다.
-
-`packages/opencode/src/session/llm.ts`:
-
-- `const isWorkflow = language instanceof GitLabWorkflowLanguageModel`
-- workflow model이면 `workflowModel.systemPrompt = prepared.system.join("\n")`
-- workflow model이면 `workflowModel.toolExecutor`를 opencode tool system에 연결
-- workflow model이면 `workflowModel.sessionPreapprovedTools`와 `approvalHandler`를 설정
-
-`packages/opencode/src/session/llm/request.ts`:
-
-```ts
-const messages =
-  isOpenaiOauth || input.isWorkflow
-    ? input.messages
-    : [
-        ...system.map((x) => ({ role: "system", content: x })),
-        ...input.messages,
-      ]
-```
-
-의미:
-
-- 일반 OpenAI-compatible provider에서는 system prompt가 `messages`의 `role:"system"`으로 들어간다.
-- GitLab workflow model에서는 system prompt가 messages에 들어가지 않고 workflow model 객체의 `systemPrompt` 필드로 별도 전달된다.
-
-adapter 관점:
-
-- `aiu-opencode-adapter`가 `@ai-sdk/openai-compatible` provider로 등록되어 호출되는 한 기존 분석이 맞다.
-- 그러나 opencode 내부의 "workflow model" 용어와 AIU Workflow adapter의 "workflow" 용어가 겹치므로 문서에서 반드시 구분해야 한다.
-- 만약 향후 AIU adapter가 opencode 내부 workflow provider 형태로 붙는다면, system prompt 추출 방식은 완전히 재검토해야 한다.
-
-근거 파일:
-
-- `packages/opencode/src/session/llm.ts`
-- `packages/opencode/src/session/llm/request.ts`
-- `packages/core/src/plugin/provider/gitlab.ts`
-
-### 4.4 Overflow/auto compaction에서 `tokens.total` 우선 사용
-
-기존 context usage 분석은 UI가 persisted token categories를 합산하며 `totalTokens`를 직접 사용하지 않는다는 점을 설명했다. 이 설명은 UI 관점에서는 여전히 맞다.
-
-하지만 auto compaction overflow 판단에서는 현재 `tokens.total`이 있으면 우선 사용한다.
-
-```ts
-const count =
-  input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
-return count >= usable(input)
-```
-
-의미:
-
-- provider usage의 `totalTokens`가 assistant message token object에 남아 있으면 overflow 판단에 영향을 준다.
-- adapter가 `total_tokens`를 부정확하게 크게 주면 자동 compaction이 예상보다 빨리 발생할 수 있다.
-- adapter가 `total_tokens`를 0 또는 누락시키고 input/output만 주면 category 합산 경로가 사용된다.
-
-근거 파일:
-
-- `packages/opencode/src/session/session.ts`
-- `packages/opencode/src/session/overflow.ts`
-
-adapter 권장:
-
-- `prompt_tokens`, `completion_tokens`, `total_tokens` 사이의 일관성을 유지해야 한다.
-- 실제 tokenizer가 없다면 character count를 쓰더라도 `model.limit.context`와 compaction 설정이 같은 단위의 proxy처럼 해석된다는 점을 운영 문서에 명시해야 한다.
-
-### 4.5 Task tool 운영 동작 보강 필요
-
-기존 `task` permission deny 분석은 핵심적으로 맞다. 다만 현재 `TaskTool`에는 다음 추가 동작이 있다.
-
-- `background: true` 지원
-- `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` 필요
-- `task_id`를 통한 기존 subagent session resume
-- parent session permission과 subagent permission을 결합하는 `deriveSubagentSessionPermission`
-- subagent에 `todowrite`/`task` 기본 deny를 보강
-- `experimental.primary_tools`를 child session에서 deny
-- foreground task도 background job infrastructure를 통해 실행
-
-또한 `SessionProcessor`에는 같은 tool/input 반복을 감지해 `doom_loop` permission을 묻는 guard가 있다.
-
-adapter 관점:
-
-- adapter가 tool loop 반복 방지를 자체적으로 수행하더라도, opencode 쪽에도 doom-loop permission guard가 있다.
-- adapter가 의미 오류를 과도하게 차단하기보다 opencode의 `invalid` tool / repair path / permission path에 맡기는 설계는 여전히 타당하다.
-- 다만 workflow LLM이 `task` tool을 자주 호출하는 경우 background/subagent session 증가와 approval UX까지 고려해야 한다.
-
-근거 파일:
-
-- `packages/opencode/src/tool/task.ts`
-- `packages/opencode/src/agent/subagent-permissions.ts`
-- `packages/opencode/src/session/processor.ts`
+| System Prompt 관리 방식 분석 | 대체로 유효 | `<available_references>`, `<mcp_instructions>`, multi system part, GitLab workflow path 추가 필요 |
+| `/init` 및 Agent별 System Prompt 영향 검토 | 대체로 유효 | V2 default agent system, references/MCP 누락 리스크 추가 필요 |
+| agent 정보 식별 가능성 검토 | 유효 | GitLab workflow provider는 별도 내부 경로라는 예외 설명 필요 |
+| Session 관리 정책 분석 | 부분 유효 | V2 durable runner/compaction 흐름은 별도 최신 분석 필요 |
+| Context Usage 계산 방식 분석 | 대체로 유효 | AI SDK 6 event field 확인 및 native runtime 사용 시 재검증 필요 |
+| Context 자동 압축 분석 | V1은 유효, V2는 보강 필요 | `SessionCompaction.make`, `<conversation-checkpoint>`, overflow compaction 추가 |
+| task 권한 deny 영향 분석 | 대체로 유효 | V2 PermissionV2 ruleset과 workflow tool approval 경로는 별도 확인 필요 |
+| Custom Provider Spec/Guide | 대체로 유효 | native runtime opt-in과 GitLab workflow custom provider 사례 추가 필요 |
 
 ---
 
-## 5. Adapter 연동 관점 요약
+## 12. adapter 관점 권장 후속 분석
 
-### 5.1 기존 adapter 설계가 계속 맞는 부분
+1. `opencode_references` 전달 필요성 검토
+   - `<available_references>`가 adapter workflow에 필요한지 결정한다.
+   - 필요하면 `opencode_references` optional input 또는 generic `opencode_system_context_extra` input을 설계한다.
 
-- 일반 OpenAI-compatible custom provider로 붙는다면 system prompt는 계속 system message로 관찰 가능하다.
-- `<env>`, `<available_skills>`, `Instructions from:` 추출 전략은 legacy provider path에서 계속 동작한다.
-- agent 이름은 기본 request body/header에 없으므로 명시 전달이 필요하다는 결론은 유지된다.
-- tool calls는 Chat Completions 응답의 `tool_calls`로 돌려줘야 한다는 계약도 유지된다.
-- usage/context 표시 문제는 여전히 provider usage object와 model metadata에 의존한다.
+2. `opencode_mcp_instructions` 전달 필요성 검토
+   - MCP server instructions를 누락해도 되는지, tool schema만으로 충분한지 확인한다.
 
-### 5.2 새로 주의해야 할 부분
+3. native runtime OFF 고정 여부 결정
+   - AIU adapter 운영에서 `OPENCODE_EXPERIMENTAL_NATIVE_LLM`을 금지할지, native path에서도 OpenAI-compatible adapter request가 호환되는지 E2E 검증할지 정한다.
 
-- `isWorkflow`는 GitLab workflow model 전용 경로다. AIU adapter의 workflow와 혼동하면 안 된다.
-- V2 runner가 활성화 또는 기본화될 경우, system/context 전달 경로는 legacy 분석만으로 충분하지 않다.
-- V2/core `InstructionContext`는 legacy `Instruction`과 포함 범위가 다르다. 특히 `CLAUDE.md`와 config `instructions` 처리 여부를 별도로 확인해야 한다.
-- `totalTokens`는 UI percentage에는 직접 쓰이지 않더라도 overflow/compaction에는 영향을 줄 수 있다.
-- task/subagent 기능은 background mode와 child permission derivation까지 포함해 더 복잡해졌다.
+4. structured output과 workflow JSON envelope 충돌 검토
+   - `format.type === "json_schema"` 요청이 AIU adapter 경로로 들어올 때 workflow prompt가 `StructuredOutput` tool call을 만들 수 있는지 검증한다.
 
----
-
-## 6. REPORT.md 반영 권장
-
-`REPORT.md`에는 `opencode 1.17.11` 섹션을 추가하고, 이 문서를 다음 목적의 갭 분석으로 등록하는 것이 좋다.
-
-- 1.17.9 이후 현재 1.17.11 소스 기준으로 기존 분석의 유지/수정 지점을 검증
-- legacy/OpenAI-compatible provider 분석과 V2/core runner 분석의 경계 명확화
-- AIU adapter가 계속 의존해도 되는 계약과 재검토해야 할 경로 구분
+5. V2 session runner 별도 분석
+   - 현재 REPORT의 많은 문서는 legacy V1 session prompt loop를 중심으로 한다.
+   - V2가 실제 사용 경로로 전환될 경우 provider request, system context, compaction, tool settlement를 별도 최신 문서로 정리해야 한다.
 
 ---
 
-## 7. 후속 분석 과제
+## 13. 최종 판단
 
-1. V2 runner가 실제 CLI/TUI 기본 실행 경로에서 언제 사용되는지 확인한다.
-2. V2 `SystemContext` baseline/update가 external provider request에 어떤 message shape로 들어가는지 end-to-end로 추적한다.
-3. `CLAUDE.md`가 V2/core path에서 의도적으로 제외된 것인지, legacy 호환 갭인지 확인한다.
-4. `isWorkflow` GitLab path와 AIU adapter path를 비교하는 용어 정리 문서를 추가한다.
-5. adapter usage 정책에서 `total_tokens`가 compaction에 주는 영향을 별도 운영 가이드로 정리한다.
+1.17.11 현재 소스는 기존 1.17.9 분석과 완전히 다른 구조로 바뀐 것은 아니다. AIU adapter가 주로 의존하는 legacy OpenAI-compatible provider request 경로는 큰 틀에서 유지된다.
 
----
+그러나 분석 gap은 분명하다.
 
-## 8. 확인한 주요 파일
+- system context가 `<env>`/instructions/skills보다 넓어졌다.
+- workflow라는 이름의 내부 GitLab provider 경로가 생겨 adapter의 외부 workflow bridge와 개념적으로 혼동될 수 있다.
+- native runtime과 V2 runner가 강화되면서 "AI SDK Chat Completions request만 보면 된다"는 분석 범위가 장기적으로는 부족해졌다.
 
-- `packages/opencode/package.json`
-- `packages/opencode/src/session/llm.ts`
-- `packages/opencode/src/session/llm/request.ts`
-- `packages/opencode/src/session/system.ts`
-- `packages/opencode/src/session/instruction.ts`
-- `packages/opencode/src/session/session.ts`
-- `packages/opencode/src/session/overflow.ts`
-- `packages/opencode/src/session/processor.ts`
-- `packages/opencode/src/session/prompt.ts`
-- `packages/opencode/src/agent/agent.ts`
-- `packages/opencode/src/tool/task.ts`
-- `packages/opencode/src/tool/registry.ts`
-- `packages/opencode/src/permission/index.ts`
-- `packages/opencode/src/command/index.ts`
-- `packages/core/src/session/runner/llm.ts`
-- `packages/core/src/session/runner/max-steps.ts`
-- `packages/core/src/system-context/builtins.ts`
-- `packages/core/src/instruction-context.ts`
-- `packages/core/src/plugin/agent.ts`
-- `packages/core/src/plugin/command.ts`
-- `packages/core/src/plugin/provider/gitlab.ts`
-- `packages/app/src/components/session/session-context-metrics.ts`
-- `packages/tui/src/component/prompt/index.tsx`
-- `packages/tui/src/feature-plugins/sidebar/context.tsx`
+따라서 현재 adapter 연동 안정성 판단에는 기존 분석을 계속 사용할 수 있지만, `references`, `mcp_instructions`, `structured output`, `native runtime`, `V2 compaction`은 별도 보강 분석 대상으로 등록하는 것이 안전하다.

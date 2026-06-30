@@ -33,4 +33,4 @@
 
 이 문서들은 현재 로컬 체크아웃된 `opencode` 1.17.11 기준으로, `REPORT.md`에 등록된 1.17.7/1.17.9 분석 결과와 최신 소스의 차이를 확인하기 위해 작성한 갭 분석 자료다.
 
-- [opencode 1.17.9 -> 1.17.11 Gap Analysis](./opencode_analysis/opencode-1.17.11/opencode-1.17.9-to-1.17.11-gap-report.md) — 현재 1.17.11 소스 기준으로 기존 system prompt, agent 정보, instruction loading, context usage, compaction, task permission 분석이 유지되는지 검증하고, V2 Session Runner/SystemContext 및 GitLab workflow model 전용 `isWorkflow` 경로가 adapter 연동 분석에 만드는 갭을 정리한 보고서.
+- [opencode 1.17.9 -> 1.17.11 분석 GAP 보고서](./opencode_analysis/opencode-1.17.11/opencode-1.17.9-to-1.17.11-gap-report.md) — 현재 1.17.11 소스에서 새로 확인되는 `available_references`, `mcp_instructions`, GitLab Workflow provider, native LLM runtime, structured output, V2 compaction 흐름이 기존 adapter 연동 분석에 미치는 차이를 정리한 보고서.
